@@ -365,6 +365,122 @@ class FaceBoundingBox:
         
         return (out_img, out_x, out_y, out_w, out_h,)
 
+class FaceBoundingBoxAdvanced:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "analysis_models": ("ANALYSIS_MODELS", {"tooltip": "加载好的人脸分析模型（来自 Face Analysis Models 节点）。"}),
+                "image":           ("IMAGE",            {"tooltip": "输入图像，支持批量。"}),
+                "filter_to_top_n_by_size": ("INT",  {"default": -1,  "min": -1,  "max": 4096, "step": 1,    "tooltip": "全局过滤：仅保留面积最大的前 N 张人脸，影响所有后续选取。-1 或 0 = 不过滤。"}),
+                "padding":         ("INT",  {"default": 0,   "min": 0,   "max": 4096, "step": 1,    "tooltip": "在检测到的人脸边界框四周额外扩展的像素数。"}),
+                "padding_percent": ("FLOAT",{"default": 0.0, "min": 0.0, "max": 2.0,  "step": 0.05, "tooltip": "按人脸宽高的百分比额外扩展边界框，与 padding 叠加生效。"}),
+                "sort_mode":       (["size", "position_horizontal"], {"tooltip": "size：按人脸面积从大到小排序，0=最大人脸。\nposition_horizontal：按人脸中心点 X 坐标从左到右排序，0=最左侧人脸。"}),
+                "index":           ("INT",  {"default": -1,  "min": -1,  "max": 4096, "step": 1,    "tooltip": "按当前 sort_mode 排序后选取第 N 张人脸。-1 返回所有人脸；0=排序第一（最大或最左）。"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = ("indexed_face", "face_0", "face_1", "face_2", "data_json")
+    OUTPUT_TOOLTIPS = (
+        "index 选中的人脸图像（含 padding）；index=-1 时返回所有人脸。",
+        "按当前 sort_mode 排序后第 0 张人脸，不足时用前一张补位。",
+        "按当前 sort_mode 排序后第 1 张人脸，不足时用前一张补位。",
+        "按当前 sort_mode 排序后第 2 张人脸，不足时用前一张补位。",
+        "JSON 字符串，包含过滤参数、排序模式、num_faces 及每张人脸的 rank/x/y/width/height。",
+    )
+    DESCRIPTION = (
+        "FaceBoundingBox 增强版。支持两种排序模式（sort_mode）：\n"
+        "• size：按人脸面积从大到小排序。\n"
+        "• position_horizontal：按人脸中心点 X 坐标从左到右排序，适合多人场景按位置选人。\n"
+        "data_json 汇总输出 num_faces 与各人脸坐标信息；face_0/1/2 为排序后的前三张。"
+    )
+    FUNCTION = "bbox"
+    CATEGORY = "FaceAnalysis"
+    OUTPUT_IS_LIST = (True, False, False, False, False)
+
+    def bbox(self, analysis_models, image, padding, padding_percent, sort_mode, index=-1, filter_to_top_n_by_size=-1):
+        out_img = []
+        out_x = []
+        out_y = []
+        out_w = []
+        out_h = []
+
+        for i in image:
+            i = T.ToPILImage()(i.permute(2, 0, 1)).convert('RGB')
+            img, x, y, w, h = analysis_models.get_bbox(i, padding, padding_percent)
+            if not img:
+                continue
+            out_img.extend(img)
+            out_x.extend(x)
+            out_y.extend(y)
+            out_w.extend(w)
+            out_h.extend(h)
+
+        if not out_img:
+            raise Exception('No face detected in image.')
+
+        # --- filter_to_top_n_by_size：保留面积最大的前 N 张（get_bbox 已按面积降序）---
+        if filter_to_top_n_by_size > 0:
+            out_img = out_img[:filter_to_top_n_by_size]
+            out_x   = out_x[:filter_to_top_n_by_size]
+            out_y   = out_y[:filter_to_top_n_by_size]
+            out_w   = out_w[:filter_to_top_n_by_size]
+            out_h   = out_h[:filter_to_top_n_by_size]
+
+        num_faces = len(out_img)
+
+        # --- 按 sort_mode 排序 ---
+        if sort_mode == "position_horizontal":
+            centers_x = [out_x[i] + out_w[i] // 2 for i in range(num_faces)]
+            sorted_idx = sorted(range(num_faces), key=lambda i: centers_x[i])
+        else:  # size
+            sorted_idx = list(range(num_faces))  # get_face() 已按面积降序排好
+
+        out_img = [out_img[i] for i in sorted_idx]
+        out_x   = [out_x[i]   for i in sorted_idx]
+        out_y   = [out_y[i]   for i in sorted_idx]
+        out_w   = [out_w[i]   for i in sorted_idx]
+        out_h   = [out_h[i]   for i in sorted_idx]
+
+        # --- 提取 face_0/1/2（排序后，筛选前；不足时用序号更低的补位）---
+        face_0 = out_img[0]
+        face_1 = out_img[1] if num_faces > 1 else face_0
+        face_2 = out_img[2] if num_faces > 2 else face_1
+
+        # --- 保存完整列表用于 data_json faces（筛选前）---
+        all_x, all_y, all_w, all_h = out_x[:], out_y[:], out_w[:], out_h[:]
+
+        # --- 按 index 筛选主输出 ---
+        if index != -1:
+            idx = min(index, num_faces - 1)
+            out_img = [out_img[idx]]
+            out_x   = [out_x[idx]]
+            out_y   = [out_y[idx]]
+            out_w   = [out_w[idx]]
+            out_h   = [out_h[idx]]
+
+        import json
+        if index == -1:
+            indexed_face_info = None
+        else:
+            actual_rank = min(index, num_faces - 1)
+            indexed_face_info = {
+                "requested_index": index,
+                "actual_rank": actual_rank,
+                "x": all_x[actual_rank], "y": all_y[actual_rank], "width": all_w[actual_rank], "height": all_h[actual_rank],
+            }
+        data_json = json.dumps({
+            "filter_to_top_n_by_size": filter_to_top_n_by_size,
+            "sort_mode": sort_mode,
+            "num_faces": num_faces,
+            "indexed_face": indexed_face_info,
+            "faces": [{"rank": i, "x": all_x[i], "y": all_y[i], "width": all_w[i], "height": all_h[i]} for i in range(num_faces)],
+        })
+
+        return (out_img, face_0, face_1, face_2, data_json)
+
+
 class FaceEmbedDistance:
     @classmethod
     def INPUT_TYPES(s):
@@ -811,6 +927,7 @@ NODE_CLASS_MAPPINGS = {
     "FaceEmbedDistance": FaceEmbedDistance,
     "FaceAnalysisModels": FaceAnalysisModels,
     "FaceBoundingBox": FaceBoundingBox,
+    "FaceBoundingBoxAdvanced": FaceBoundingBoxAdvanced,
     "FaceAlign": FaceAlign,
     "FaceSegmentation": faceSegmentation,
     "FaceWarp": FaceWarp,
@@ -820,6 +937,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FaceEmbedDistance": "Face Embeds Distance",
     "FaceAnalysisModels": "Face Analysis Models",
     "FaceBoundingBox": "Face Bounding Box",
+    "FaceBoundingBoxAdvanced": "Face Bounding Box Advanced",
     "FaceAlign": "Face Align",
     "FaceSegmentation": "Face Segmentation",
     "FaceWarp": "Face Warp",
