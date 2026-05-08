@@ -18,3 +18,56 @@ Precompiled Dlib for Windows can be found [here](https://github.com/z-mahmud22/D
 ![face analysis](./face_analysis.jpg)
 
 The extension also supports [AuraFace](https://huggingface.co/fal/AuraFace-v1/tree/main) that is a free alternative to InsightFace. Download all the files and place them under `models/insightface/models/auraface/`
+
+## Nodes
+
+### Face Bounding Box Advanced
+
+An enhanced version of **Face Bounding Box** with multi-face selection modes, pre-filtering, and structured JSON output.
+
+#### Inputs
+
+| Name | Type | Description |
+|------|------|-------------|
+| `analysis_models` | ANALYSIS_MODELS | Face analysis model loaded by the **Face Analysis Models** node |
+| `image` | IMAGE | Input image(s), batch supported |
+| `filter_to_top_n_by_size` | INT | Global pre-filter: keep only the N largest faces before sorting and selection. `0` or `-1` = disabled |
+| `padding` | INT | Extra pixels added around each detected face bbox |
+| `padding_percent` | FLOAT | Extra padding as a fraction of face width/height, applied on top of `padding` |
+| `sort_mode` | `size` / `position_horizontal` | `size`: sort faces largest-first. `position_horizontal`: sort faces left-to-right by center X |
+| `index` | INT | Select the Nth face from the sorted list. `-1` returns all faces |
+
+#### Outputs
+
+| Name | Type | Description |
+|------|------|-------------|
+| `indexed_face` | IMAGE | Face(s) selected by `index`. Returns all faces when `index = -1` |
+| `face_0` | IMAGE | 1st face in sorted order. Falls back to itself if fewer faces detected |
+| `face_1` | IMAGE | 2nd face in sorted order. Falls back to `face_0` if not available |
+| `face_2` | IMAGE | 3rd face in sorted order. Falls back to `face_1` if not available |
+| `data_json` | STRING | JSON summary of the detection results (see below) |
+
+#### data_json format
+
+```json
+{
+  "filter_to_top_n_by_size": 3,
+  "sort_mode": "position_horizontal",
+  "num_faces": 3,
+  "indexed_face": {
+    "requested_index": 1,
+    "actual_rank": 1,
+    "x": 150, "y": 25, "width": 95, "height": 110
+  },
+  "faces": [
+    {"rank": 0, "x": 10,  "y": 20, "width": 100, "height": 120},
+    {"rank": 1, "x": 150, "y": 25, "width": 95,  "height": 110},
+    {"rank": 2, "x": 300, "y": 30, "width": 88,  "height": 105}
+  ]
+}
+```
+
+- `num_faces`: face count after `filter_to_top_n_by_size` is applied
+- `indexed_face`: the face selected by `index` (`null` when `index = -1`)
+- `actual_rank` may differ from `requested_index` when the index exceeds the number of detected faces (clamped to last)
+- `faces`: all faces after filtering, sorted by `sort_mode` — independent of `index`
